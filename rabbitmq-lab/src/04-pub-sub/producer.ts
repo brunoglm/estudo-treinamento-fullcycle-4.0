@@ -29,6 +29,7 @@ async function producer() {
         Buffer.from(JSON.stringify(message)),
         {
           contentType: "application/json",
+          deliveryMode: 2,
         }
       );
     })

@@ -8,7 +8,9 @@ async function producer() {
   const message = "Hello World!";
 
   await channel.assertQueue(queue);
-  channel.sendToQueue(queue, Buffer.from(message));
+  channel.sendToQueue(queue, Buffer.from(message), {
+    deliveryMode: 2,
+  });
 
   console.log(`[x] Sent ${message}`);
 
