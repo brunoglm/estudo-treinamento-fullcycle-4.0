@@ -1,6 +1,12 @@
 package rabbitmq
 
-import amqp "github.com/rabbitmq/amqp091-go"
+import (
+	"context"
+	"errors"
+	"time"
+
+	amqp "github.com/rabbitmq/amqp091-go"
+)
 
 const operation = "RabbitMQManager"
 
@@ -30,5 +36,69 @@ func NewRabbitMQManager() *RabbitMQManager {
 		notifyChannClose: make(chan *amqp.Error, poolSize),
 		done:             make(chan bool),
 		poolMaxSize:      poolSize,
+	}
+}
+
+// declare da infra
+// CreateConnection
+// CreateChannelPool
+// HandleReconnect
+// handleConnectionRecovery
+// handleChannelRecovery
+// connect
+// createChannel
+
+func (m *RabbitMQManager) Close() error {
+	close(m.done)
+
+	if m.pool != nil {
+		m.pool.Close()
+	}
+
+	if m.connection != nil {
+		err := m.connection.Close()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// IsHealthy checks if message broker is healthy
+func (m *RabbitMQManager) IsHealthy() bool {
+	cnx := m.connection
+
+	if cnx == nil {
+		return false
+	}
+
+	channel, err := cnx.Channel()
+	if err != nil {
+		return false
+	}
+
+	defer channel.Close()
+
+	return true
+}
+
+// GetChannel get channel from pool
+func (m *RabbitMQManager) GetChannel() (ChannelInterface, error) {
+	if m.pool == nil {
+		return nil, errors.New("channel pool is not initialized")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	return m.pool.Get(ctx)
+}
+
+// ReturnChannelToPool returns channel to pool or closes it if pool is not initialized
+func (m *RabbitMQManager) ReturnChannelToPool(channel ChannelInterface) {
+	if m.pool != nil && channel != nil {
+		m.pool.Put(channel)
+	} else if channel != nil {
+		channel.Close()
 	}
 }
