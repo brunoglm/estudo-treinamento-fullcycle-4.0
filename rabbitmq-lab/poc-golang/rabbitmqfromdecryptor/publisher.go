@@ -62,7 +62,7 @@ func writeMessage(channel ChannelInterface, exchangeName, routingKey string, mes
 			if !confirm.Ack {
 				err = errors.New("nack received from the server during message posting")
 			}
-		case <-time.After(getAckTimeout()): // XXXXXXXXXXX Pegar do config em vez disso
+		case <-time.After(getAckTimeout()):
 			err = errors.New("timeout while waiting for ack")
 		}
 	}
