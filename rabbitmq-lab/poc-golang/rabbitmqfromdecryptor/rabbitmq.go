@@ -301,7 +301,12 @@ func SetupInfra(rm *RabbitMQManager) error {
 	if err != nil {
 		return err
 	}
-	defer ch.Close()
+	defer func() {
+		errClose := ch.Close()
+		if errClose != nil {
+			fmt.Println("Context: SetupInfra - error closing channel: ", errClose) //logar com otel
+		}
+	}()
 
 	// 1. Declarar a Fila (Idempotente)
 	_, err = ch.QueueDeclare(
