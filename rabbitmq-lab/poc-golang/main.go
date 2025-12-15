@@ -14,6 +14,8 @@ func main() {
 	amqpURL := "amqp://admin:password123@localhost:5672/"
 	fmt.Println(amqpURL)
 
+	os.Setenv("APP_CONN_QUEUE", amqpURL)
+
 	rabbitMQManager := rabbitmq.NewRabbitMQManager()
 
 	err := rabbitMQManager.CreateConnection()
@@ -39,9 +41,12 @@ func main() {
 			message := "Hello, RabbitMQ!"
 			fmt.Printf("Publishing message: %s\n", message)
 
-			publisher.SendMessage(ctx, []byte(message), "test-exchange", "test-queue", "test-routing-key")
-
-			fmt.Println("Message published successfully")
+			err := publisher.SendMessage(ctx, []byte(message), "amq.direct", "boleto-queue", "test-routing-key")
+			if err != nil {
+				fmt.Printf("Failed to publish message: %v\n", err) //logar com otel
+			} else {
+				fmt.Println("Message published:", message)
+			}
 
 			time.Sleep(2 * time.Second)
 			cancel()

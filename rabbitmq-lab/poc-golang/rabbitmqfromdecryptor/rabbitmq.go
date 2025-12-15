@@ -305,12 +305,12 @@ func SetupInfra(rm *RabbitMQManager) error {
 
 	// 1. Declarar a Fila (Idempotente)
 	_, err = ch.QueueDeclare(
-		"test-boleto", // nome: "test.queue"
-		true,          // durable: Sim (salva no disco)
-		false,         // autoDelete: Não (mantém fila mesmo sem consumers)
-		false,         // exclusive: Não
-		false,         // noWait
-		nil,           // args
+		"boleto-queue", // nome: "test.queue"
+		true,           // durable: Sim (salva no disco)
+		false,          // autoDelete: Não (mantém fila mesmo sem consumers)
+		false,          // exclusive: Não
+		false,          // noWait
+		nil,            // args
 	)
 	if err != nil {
 		return fmt.Errorf("falha ao declarar fila: %w", err)
@@ -318,9 +318,9 @@ func SetupInfra(rm *RabbitMQManager) error {
 
 	// 2. Fazer o Bind (Ligar Exchange -> Fila)
 	err = ch.QueueBind(
-		"test-queue",       // nome da fila
+		"boleto-queue",     // nome da fila
 		"test-routing-key", // routing key (ex: "test.queue" ou "logs.*")
-		"test-exchange",    // exchange (ex: "amq.direct")
+		"amq.direct",       // exchange (ex: "amq.direct")
 		false,
 		nil,
 	)
