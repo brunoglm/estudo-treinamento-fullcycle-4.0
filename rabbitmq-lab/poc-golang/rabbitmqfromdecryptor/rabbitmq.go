@@ -2,14 +2,14 @@ package rabbitmq
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
-
-const operation = "RabbitMQManager"
 
 type ManagedChannel struct {
 	*amqp.Channel
@@ -41,13 +41,159 @@ func NewRabbitMQManager() *RabbitMQManager {
 }
 
 // declare da infra
-// CreateConnection
-// CreateChannelPool
 // HandleReconnect
-// handleConnectionRecovery
-// handleChannelRecovery
-// connect
-// createChannel
+
+func (m *RabbitMQManager) handleConnectionRecovery(err *amqp.Error) {
+	//logar com otel
+	// log.Error(errors.New(err.Error()), operation, "Connection closed, attempting to reconnect", nil)
+
+	for {
+		m.notifyChannClose = make(chan *amqp.Error, m.poolMaxSize)
+		m.notifyConnClose = make(chan *amqp.Error, 1)
+		m.connection = nil
+		m.pool = nil
+
+		reconnErr := m.connect()
+		if reconnErr == nil {
+			channelPoolError := m.CreateChannelPool()
+			if channelPoolError == nil {
+				//logar com otel
+				// log.Info(operation, "Connection re-established successfully", nil)
+				return
+			}
+			fmt.Printf("Context: handleConnectionRecovery - error recreating channel pool: %v\n", channelPoolError) //logar com otel
+		}
+
+		fmt.Printf("Context: handleConnectionRecovery - error recreating connection: %v\n", reconnErr) //logar com otel
+		time.Sleep(getRetryConnectionInterval())
+	}
+}
+
+func (m *RabbitMQManager) handleChannelRecovery(err *amqp.Error) {
+	var chError error
+
+	if err != nil {
+		chError = errors.New(err.Error())
+	} else {
+		chError = errors.New("channel closed without error")
+	}
+
+	//logar com otel
+	fmt.Println("Context: handleChannelRecovery - channel closed, attempting to fill channel pool: ", chError)
+	// log.Error(chError, operation, "Channel closed, attempting to fill channel pool", map[string]string{
+	// 	"PoolMaxSize":     strconv.Itoa(m.poolMaxSize),
+	// 	"ChannelPoolSize": strconv.Itoa(m.pool.Size()),
+	// })
+
+	for m.connection != nil && m.pool != nil && m.pool.Size() < m.poolMaxSize {
+		ch, creationErr := m.createChannel()
+		if creationErr == nil {
+			m.pool.Put(ch)
+		}
+
+		fmt.Printf("Context: handleChannelRecovery - error recreating channel: %v\n", creationErr) //logar com otel
+		time.Sleep(getRetryChannelInterval())
+	}
+
+	//logar com otel
+	// log.Info(operation, "Channel pool successfully recreated", map[string]string{
+	// 	"PoolMaxSize":     strconv.Itoa(m.poolMaxSize),
+	// 	"ChannelPoolSize": strconv.Itoa(m.pool.Size()),
+	// })
+}
+
+func (m *RabbitMQManager) CreateChannelPool() error {
+	pool := NewChannelPool(m.poolMaxSize)
+
+	for i := 0; i < m.poolMaxSize; i++ {
+		ch, chErr := m.createChannel()
+
+		if chErr != nil {
+			pool.Close()
+			return chErr
+		}
+
+		pool.Put(ch)
+	}
+
+	m.pool = pool
+
+	fmt.Println("Channel pool created with size:", m.poolMaxSize)
+
+	return nil
+}
+
+func (m *RabbitMQManager) CreateConnection() error {
+	var err error
+
+	for i := 0; i < getMaxConnectionRetries(); i++ {
+		err = m.connect()
+
+		if err == nil {
+			return nil
+		}
+
+		time.Sleep(getRetryConnectionInterval())
+	}
+
+	return err
+}
+
+func (m *RabbitMQManager) connect() error {
+	var err error
+
+	m.connection, err = amqp.DialConfig(os.Getenv("APP_CONN_QUEUE"), amqp.Config{
+		Heartbeat: getHeartbeat(),
+		TLSClientConfig: &tls.Config{
+			MinVersion:         tLSVersion(os.Getenv("APP_QUEUE_MIN_TLS")),
+			MaxVersion:         tLSVersion(os.Getenv("APP_QUEUE_MAX_TLS")),
+			InsecureSkipVerify: os.Getenv("APP_QUEUE_BYPASS_CERTIFICATE") == "true",
+		},
+	})
+
+	if err != nil {
+		return fmt.Errorf("Context: connect - dialing to rabbitMQ, error: %w", err)
+	}
+
+	m.connection.NotifyClose(m.notifyConnClose)
+
+	fmt.Println("Connected to RabbitMQ")
+
+	return nil
+}
+
+func (m *RabbitMQManager) createChannel() (ChannelInterface, error) {
+	var channel *amqp.Channel
+	var err error
+
+	if channel, err = m.connection.Channel(); err != nil {
+		fmt.Println("Error creating channel: ", err)
+		return nil, fmt.Errorf("Context: createChannel, error: %w", err)
+	}
+
+	if err = channel.Confirm(false); err != nil {
+		return nil, fmt.Errorf("Context: createChannel - enabling confirm mode, error: %w", err)
+	}
+
+	individualNotifyClose := make(chan *amqp.Error, 1)
+	channel.NotifyClose(individualNotifyClose)
+	confirmationChan := make(chan amqp.Confirmation, 1)
+	channel.NotifyPublish(confirmationChan)
+
+	go func() {
+		closeErr := <-individualNotifyClose
+
+		select {
+		case m.notifyChannClose <- closeErr:
+		case <-m.done:
+		}
+	}()
+
+	return &ManagedChannel{
+		channel,
+		confirmationChan,
+	}, nil
+}
 
 func (m *RabbitMQManager) Close() error {
 	close(m.done)
@@ -109,5 +255,20 @@ func (m *RabbitMQManager) ReturnChannelToPool(channel ChannelInterface) {
 		if errCh != nil {
 			fmt.Println("Error closing channel in ReturnChannelToPool: ", errCh) // colocar otel logger
 		}
+	}
+}
+
+func tLSVersion(version string) uint16 {
+	switch version {
+	case "1.0":
+		return tls.VersionTLS10
+	case "1.1":
+		return tls.VersionTLS11
+	case "1.2":
+		return tls.VersionTLS12
+	case "1.3":
+		return tls.VersionTLS13
+	default:
+		return tls.VersionTLS12
 	}
 }
