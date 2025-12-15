@@ -27,7 +27,7 @@ type RabbitMQManagerInterface interface {
 	CreateConnection() error
 	CreateChannelPool() error
 	HandleReconnect()
-	Close()
+	Close() error
 	IsHealthy() bool
 	GetChannel() (ChannelInterface, error)
 	ReturnChannelToPool(channel ChannelInterface)

@@ -318,9 +318,9 @@ func SetupInfra(rm *RabbitMQManager) error {
 
 	// 2. Fazer o Bind (Ligar Exchange -> Fila)
 	err = ch.QueueBind(
-		"test-boleto", // nome da fila
-		"boleto",      // routing key (ex: "test.queue" ou "logs.*")
-		"amq.direct",  // exchange (ex: "amq.direct")
+		"test-queue",       // nome da fila
+		"test-routing-key", // routing key (ex: "test.queue" ou "logs.*")
+		"test-exchange",    // exchange (ex: "amq.direct")
 		false,
 		nil,
 	)

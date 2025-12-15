@@ -27,8 +27,9 @@ func (r *RabbitMQManagerMock) HandleReconnect() {
 	r.Called()
 }
 
-func (r *RabbitMQManagerMock) Close() {
-	r.Called()
+func (r *RabbitMQManagerMock) Close() error {
+	args := r.Called()
+	return args.Error(0)
 }
 
 func (r *RabbitMQManagerMock) IsHealthy() bool {
