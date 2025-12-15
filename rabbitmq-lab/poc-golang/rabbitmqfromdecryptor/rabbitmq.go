@@ -40,8 +40,24 @@ func NewRabbitMQManager() *RabbitMQManager {
 	}
 }
 
-// declare da infra
-// HandleReconnect
+func (m *RabbitMQManager) getConnection() *amqp.Connection {
+	return m.connection
+}
+
+func (m *RabbitMQManager) HandleReconnect() {
+	for {
+		select {
+		case <-m.done:
+			return
+		case err := <-m.notifyConnClose:
+			if err != nil {
+				m.handleConnectionRecovery(err)
+			}
+		case err := <-m.notifyChannClose:
+			m.handleChannelRecovery(err)
+		}
+	}
+}
 
 func (m *RabbitMQManager) handleConnectionRecovery(err *amqp.Error) {
 	//logar com otel
@@ -271,4 +287,46 @@ func tLSVersion(version string) uint16 {
 	default:
 		return tls.VersionTLS12
 	}
+}
+
+// setup infra
+
+func SetupInfra(rm *RabbitMQManager) error {
+	conn := rm.getConnection()
+	if conn == nil {
+		return errors.New("connection is not established")
+	}
+
+	ch, err := conn.Channel()
+	if err != nil {
+		return err
+	}
+	defer ch.Close()
+
+	// 1. Declarar a Fila (Idempotente)
+	_, err = ch.QueueDeclare(
+		"test-boleto", // nome: "test.queue"
+		true,          // durable: Sim (salva no disco)
+		false,         // autoDelete: Não (mantém fila mesmo sem consumers)
+		false,         // exclusive: Não
+		false,         // noWait
+		nil,           // args
+	)
+	if err != nil {
+		return fmt.Errorf("falha ao declarar fila: %w", err)
+	}
+
+	// 2. Fazer o Bind (Ligar Exchange -> Fila)
+	err = ch.QueueBind(
+		"test-boleto", // nome da fila
+		"boleto",      // routing key (ex: "test.queue" ou "logs.*")
+		"amq.direct",  // exchange (ex: "amq.direct")
+		false,
+		nil,
+	)
+	if err != nil {
+		return fmt.Errorf("falha ao fazer bind: %w", err)
+	}
+
+	return nil
 }
