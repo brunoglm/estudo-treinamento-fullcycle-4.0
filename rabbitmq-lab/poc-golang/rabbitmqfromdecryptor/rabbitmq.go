@@ -3,6 +3,7 @@ package rabbitmq
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -77,7 +78,12 @@ func (m *RabbitMQManager) IsHealthy() bool {
 		return false
 	}
 
-	defer channel.Close()
+	defer func() {
+		errCh := channel.Close()
+		if errCh != nil {
+			fmt.Println("Error closing channel in IsHealthy: ", errCh) // colocar otel logger
+		}
+	}()
 
 	return true
 }
@@ -99,6 +105,9 @@ func (m *RabbitMQManager) ReturnChannelToPool(channel ChannelInterface) {
 	if m.pool != nil && channel != nil {
 		m.pool.Put(channel)
 	} else if channel != nil {
-		channel.Close()
+		errCh := channel.Close()
+		if errCh != nil {
+			fmt.Println("Error closing channel in ReturnChannelToPool: ", errCh) // colocar otel logger
+		}
 	}
 }

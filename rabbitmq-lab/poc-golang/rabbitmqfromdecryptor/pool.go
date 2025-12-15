@@ -3,6 +3,7 @@ package rabbitmq
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 )
 
@@ -45,7 +46,10 @@ func (p *ChannelPool) Put(channel ChannelInterface) {
 
 	select {
 	case <-p.done:
-		channel.Close()
+		errCh := channel.Close()
+		if errCh != nil {
+			fmt.Println("Error closing channel in pool Put: ", errCh) // colocar otel logger
+		}
 		return
 	default:
 	}
@@ -53,7 +57,10 @@ func (p *ChannelPool) Put(channel ChannelInterface) {
 	select {
 	case p.channels <- channel:
 	default:
-		channel.Close()
+		errCh := channel.Close()
+		if errCh != nil {
+			fmt.Println("Error closing channel in second select of pool Put: ", errCh) // colocar otel logger
+		}
 	}
 }
 
@@ -64,7 +71,10 @@ func (p *ChannelPool) Close() {
 		close(p.channels)
 		for channel := range p.channels {
 			if channel != nil {
-				channel.Close()
+				errCh := channel.Close()
+				if errCh != nil {
+					fmt.Println("Error closing channel in pool: ", errCh) // colocar otel logger
+				}
 			}
 		}
 	})

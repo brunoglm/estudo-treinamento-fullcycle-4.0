@@ -33,7 +33,10 @@ func (p *Publisher) SendMessage(ctx context.Context, eventData []byte, exchangeN
 	err = writeMessage(channel, exchangeName, routingKey, eventData)
 
 	if err != nil {
-		channel.Close()
+		errCh := channel.Close()
+		if errCh != nil {
+			return errors.New("failed to close channel after publish error: " + errCh.Error() + " | original error: " + err.Error())
+		}
 		return err
 	}
 
