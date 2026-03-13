@@ -270,6 +270,10 @@ func (c *Consumer) ReadUsersBatchWithDLQ(topic string, batchSize int, workerCoun
 	var wg sync.WaitGroup
 	dlqTopic := topic + "-dlq"
 
+	// Variável de controle de retentativas do LOTE
+	retryCount := 0
+	maxRetries := 5 // Define o limite (ex: 5 tentativas antes de desistir)
+
 	fmt.Printf("🚀 Consumidor em Lote iniciado: %s (Batch: %d, Workers: %d)\n", topic, batchSize, workerCount)
 
 	for {
@@ -324,7 +328,17 @@ func (c *Consumer) ReadUsersBatchWithDLQ(topic string, batchSize int, workerCoun
 
 		// 3. Verificação de Resiliência
 		if dlqFailed {
+			retryCount++
 			fmt.Println("🚨 Falha crítica: DLQ indisponível. Rebobinando para reprocessar o lote...")
+
+			if retryCount >= maxRetries {
+				// OPÇÃO A: Crashar a app para intervenção humana (Recomendado para casos críticos)
+				log.Fatalf("🔥 LIMITE DE RETENTATIVAS ATINGIDO: DLQ offline por muito tempo. Encerrando para evitar perda de dados.")
+
+				// OPÇÃO B: Se preferir pular o lote e seguir em frente (Cuidado: perda de dados!)
+				// retryCount = 0
+				// continue
+			}
 
 			// Pegamos a primeira mensagem do lote para saber de onde recomeçar
 			firstMsg := messages[0]
@@ -357,6 +371,8 @@ func (c *Consumer) ReadUsersBatchWithDLQ(topic string, batchSize int, workerCoun
 			time.Sleep(2 * time.Second) // Backoff para evitar loop frenético
 			continue
 		}
+
+		retryCount = 0
 
 		// 4. Finalização: Commit do Offset (Confirmamos o lote inteiro)
 		lastMsg := messages[len(messages)-1]
