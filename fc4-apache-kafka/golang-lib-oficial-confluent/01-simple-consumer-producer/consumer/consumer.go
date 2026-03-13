@@ -6,6 +6,7 @@ import (
 	"log"
 	"simple-consumer-producer/models"
 	"simple-consumer-producer/producer"
+	"sync"
 	"time"
 
 	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
@@ -158,17 +159,19 @@ func (c *Consumer) ReadUsersWithWorkerPoolAndPushDLQ(topic string, workerCount i
 }
 
 // pushToDLQ encapsula a lógica de postar a mensagem original no tópico de erro
-func (c *Consumer) pushToDLQ(topic string, payload []byte, reason string) {
+func (c *Consumer) pushToDLQ(topic string, payload []byte, reason string) error {
 	if c.producer == nil {
 		fmt.Println("🚨 DLQ não configurada no Consumer. Mensagem perdida!")
-		return
+		return fmt.Errorf("DLQ não configurada")
 	}
 
 	// Criamos uma mensagem simples ou podemos adicionar Headers com o motivo do erro
 	err := c.producer.PublishRaw(topic, payload, reason)
 	if err != nil {
 		fmt.Printf("🚨 Falha crítica ao postar na DLQ: %v\n", err)
+		return err
 	}
+	return nil
 }
 
 func (c *Consumer) Close() {
@@ -205,4 +208,169 @@ func (c *Consumer) ReprocessSpecificOffset(topic string, partition int32, offset
 	handler(user)
 
 	// Nota: Como o group-id é novo e temporário, nem precisamos dar Commit.
+}
+
+func (c *Consumer) ReadUsersInBatches(topic string, batchSize int, workerCount int, handler func(models.UserEvent) error) {
+	c.kafkaConsumer.SubscribeTopics([]string{topic}, nil)
+
+	semaphore := make(chan struct{}, workerCount)
+	var wg sync.WaitGroup
+
+	for {
+		var lastMsg *kafka.Message
+		messagesInBatch := 0
+
+		// Início do ciclo do Lote
+		for i := 0; i < batchSize; i++ {
+			msg, err := c.kafkaConsumer.ReadMessage(time.Second)
+			if err != nil {
+				// Se der timeout e já tivermos mensagens no lote, saímos para processar o que tem
+				if err.(kafka.Error).Code() == kafka.ErrTimedOut && messagesInBatch > 0 {
+					break
+				}
+				continue
+			}
+
+			lastMsg = msg
+			messagesInBatch++
+			wg.Add(1)
+			semaphore <- struct{}{}
+
+			go func(m *kafka.Message) {
+				defer wg.Done()
+				defer func() { <-semaphore }()
+
+				var user models.UserEvent
+				if err := json.Unmarshal(m.Value, &user); err == nil {
+					_ = handler(user) // O handler deve ser idempotente
+				}
+			}(msg)
+		}
+
+		// Aguarda todos os workers deste lote terminarem
+		wg.Wait()
+
+		// Se processamos algo, damos o commit na ÚLTIMA mensagem do lote
+		if lastMsg != nil {
+			_, err := c.kafkaConsumer.CommitMessage(lastMsg)
+			if err != nil {
+				fmt.Printf("⚠️ Erro ao dar commit no lote: %v\n", err)
+			} else {
+				fmt.Printf("✅ Lote de %d mensagens processado e comitado no offset %v\n",
+					messagesInBatch, lastMsg.TopicPartition.Offset)
+			}
+		}
+	}
+}
+
+func (c *Consumer) ReadUsersBatchWithDLQ(topic string, batchSize int, workerCount int, handler func([]byte) error) {
+	c.kafkaConsumer.SubscribeTopics([]string{topic}, nil)
+
+	semaphore := make(chan struct{}, workerCount)
+	var wg sync.WaitGroup
+	dlqTopic := topic + "-dlq"
+
+	fmt.Printf("🚀 Consumidor em Lote iniciado: %s (Batch: %d, Workers: %d)\n", topic, batchSize, workerCount)
+
+	for {
+		messages := make([]*kafka.Message, 0, batchSize)
+
+		// 1. Coleta do Lote (Buffer de leitura)
+		for i := 0; i < batchSize; i++ {
+			msg, err := c.kafkaConsumer.ReadMessage(time.Second)
+			if err != nil {
+				// Se der timeout, mas já tivermos algumas mensagens, processamos o que tem
+				if err.(kafka.Error).Code() == kafka.ErrTimedOut && len(messages) > 0 {
+					break
+				}
+				continue
+			}
+			messages = append(messages, msg)
+		}
+
+		if len(messages) == 0 {
+			continue
+		}
+
+		// 2. Processamento do Lote via Worker Pool
+		var mu sync.Mutex
+		dlqFailed := false
+
+		for _, m := range messages {
+			wg.Add(1)
+			semaphore <- struct{}{}
+
+			go func(msg *kafka.Message) {
+				defer wg.Done()
+				defer func() { <-semaphore }()
+
+				// Executa a lógica de negócio
+				errHandler := handler(msg.Value)
+				if errHandler != nil {
+					fmt.Printf("❌ Erro no handler. Enviando para DLQ...\n")
+					if errPush := c.pushToDLQ(dlqTopic, msg.Value, errHandler.Error()); errPush != nil {
+						mu.Lock()
+						if !dlqFailed {
+							dlqFailed = true
+						}
+						mu.Unlock()
+					}
+				}
+			}(m)
+		}
+
+		// Aguarda a conclusão de todos os workers do lote atual
+		wg.Wait()
+
+		// 3. Verificação de Resiliência
+		if dlqFailed {
+			fmt.Println("🚨 Falha crítica: DLQ indisponível. Rebobinando para reprocessar o lote...")
+
+			// Pegamos a primeira mensagem do lote para saber de onde recomeçar
+			firstMsg := messages[0]
+
+			// --- CORREÇÃO DO ASSIGN ---
+			// Pegamos o que o consumidor está lendo atualmente
+			currentAssignments, _ := c.kafkaConsumer.Assignment()
+
+			// Criamos o ponto de Seek
+			tp := kafka.TopicPartition{
+				Topic:     firstMsg.TopicPartition.Topic,
+				Partition: firstMsg.TopicPartition.Partition,
+				Offset:    firstMsg.TopicPartition.Offset,
+			}
+
+			// 1. Movemos o ponteiro
+			_ = c.kafkaConsumer.Seek(tp, 0)
+
+			// 2. Atualizamos o offset na nossa lista de atribuições atuais
+			for i := range currentAssignments {
+				if currentAssignments[i].Partition == tp.Partition && *currentAssignments[i].Topic == *tp.Topic {
+					currentAssignments[i].Offset = tp.Offset
+				}
+			}
+
+			// 3. Reatribuímos TUDO o que já líamos, mas com o novo offset na partição alvo
+			// Isso limpa o buffer sem perder as outras partições
+			_ = c.kafkaConsumer.Assign(currentAssignments)
+
+			time.Sleep(2 * time.Second) // Backoff para evitar loop frenético
+			continue
+		}
+
+		// 4. Finalização: Commit do Offset (Confirmamos o lote inteiro)
+		lastMsg := messages[len(messages)-1]
+		if lastMsg != nil {
+			_, err := c.kafkaConsumer.CommitMessage(lastMsg)
+			if err != nil {
+				fmt.Printf("⚠️ Erro ao comitar lote: %v\n", err)
+				// reiniciar a aplicação para tentar novamente (simulando um crash)
+				log.Fatal("Reiniciando aplicação para tentar novamente...")
+				// Em produção, você pode optar por estratégias mais sofisticadas de retry ou alertas
+				// ao invés de crashar, como por exemplo: aguardar um tempo e tentar dar commit novamente
+			} else {
+				fmt.Printf("✅ Lote de %d mensagens finalizado no offset %v\n", len(messages), lastMsg.TopicPartition.Offset)
+			}
+		}
+	}
 }
